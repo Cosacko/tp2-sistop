@@ -1,0 +1,87 @@
+    Laboratorio 2 de Sistemas Operativos, FaMAF.
+    Integrantes: 
+            Cosano, Agustin.
+            Facchin, Eliseo.
+            Guardabassi, Emiliano.
+            Zuk, Santiago.
+        
+    En este laboratorio se implementamos las syscalls semaphores en el SO Xv6. Para lograr esto,
+    primero investigamos otras syscalls ya implementadas por el mismo Xv6 para ver dónde figuran
+    todos los llamados a estas. Usando grep sobre todo el directorio se hizo fácil, por ejemplo:
+    grep -i "uptime" ./*/*.  
+
+    Luego tuvimos que entender qué hace argint() para poder usarla en sysproc.c. en términos 
+    sencillos argint toma dos argumentos, int y int * donde el primero declara en qué posición 
+    va el argumento y el segundo es un puntero a una variable donde se almacenará el valor del 
+    argumento que se extrae. Por ejemplo:argint(0, &sem); argint(1,&value); return sem_open(sem,value)
+    aquí argint se encarga de pasar los argumentos de manera correcta, donde 0 significa que es el primer 
+    argumento y que se guarda en sem (ver kernel/sysproc.c:95). Es decir, argint es una forma para pasar 
+    parámetros desde el user space al kernel space.
+
+    Una vez hecho todo eso creamos un file semaphores.c en kernel y un pingpong.c en user; si 
+    bien los semaphores podían ser implementados en proc.c decidimos hacerlos en un file aparte
+    por comodidad. En semaphores.c lo primero que hicimos fue copiar los headers de proc.c y luego 
+    armar los prototipos de las funciones (sem_open(), sem_close(), sem_up(), sem_down()). Nos 
+    decidimos en primera instancia por definirlos con un struct de 3 partes: uint name, int value, 
+    struct spinlock lock. Pronto nos dimos cuenta que name sobraba, pues ibamos a inicializar todos
+    los semaphores en un array (sem_table) de 256 de capacidad (número elegido arbitrariamente) y name no aportaría
+    nada dado que sería lo mismo que el índice del arreglo, por lo tanto decidimos removerlo.
+
+    Las implementaciones de las funciones fueron relativamente sencillas, el cuerpo principal de las 
+    funciones se rodea por una llamada a acquire() y release() pasandole los locks de los semaphores, lo cual
+    permite encapsular su ejecución y eliminar problemas de concurrencia, en cierto sentido, acquire y 
+    release son semaphores básicos. 
+
+    Las funciones sem_up(int sem) y sem_down(int sem) son las que se usan para manejar los semaphores. 
+    Sem_up aumenta en 1 value del semaphore y si value era 0 al entrar hace una llamada a wakeup que despierta 
+    los procesos que sem_down mandó a dormir. La funcion sem_down reduce en 1 value del  semaphore y si era 0 hace un 
+    llamado a sleep que pone el proceso a dormir (el proceso está suspendido, por lo cual no consume recursos 
+    de cpu, como en un busy-waiting que podría ser un loop infinito).
+
+    La combinación de estas dos funciones hace que los semaphores puedan trabajar bien. Por ejemplo, digamos
+    que tenemos el semaphore 1 que tiene un value de 3, se llama a sem_down, se chequea el value, como es 3
+    resta 1 y sale, al final lo espera sem_up que chequea value, como es 3 suma uno y sale. En este caso no 
+    pasa nada importante, pero supongamos que tenemos 4 hilos ejecutandose, en este caso van a entrar los 4 
+    a sem_down, los primeros 3 van a restar 1 y el 4 va a llegar con un value de 0, por lo tanto se irá a sleep;
+    cuando salga el primero de estos 3 hilos pasará por sem_up, que ingresará con un value de 0 por lo tanto 
+    llamará wakeup para despertar al 4to hilo y sumará 1 para que pueda pasar, y así con los otros hilos.
+
+    La llamada sem_open(int sem, int value) lo que hace es tomar dos argumentos, "int sem" en este caso lo podemos
+    pensar como el índice donde se encuentra el semaphore en la sem_table y value el valor al que lo queremos 
+    setear. Sem_open primero chequea que "int sem" se encuentre contenido dentro del arreglo, es decir, sem pertenece
+    al intervalo [0,MAX_SEM). Luego revisa que value == -1, que es el valor con el que se inicializan los semaphores en 
+    sem_init. Luego, dentro de acquire y release setea el valor del semaphore a value.
+
+    La llamada sem_close(int sem) hace el mismo chequeo inicial que sem_open para ver si sem está dentro del arreglo.
+    Luego revisa que value sea mayor a 0 y setea el value del semaphore a -1 que es el valor con el que se inicializan en    sem_init.
+
+    En caso de error en cualquiera se las syscalls devuelven como código de error SEM_ERROR que es igual a 0, en caso
+    de éxito devuelven SEM_SUCCESS que es igual a 1.
+
+    Luego está la función sem_init() que el usuario no puede llamarla mediante syscalls pues se ejecuta al 
+    inicial Xv6. Esta función se define en semaphores.c y se hace el prototipo en defs.h y se ejecuta en main.c dentro
+    del kernel space. Lo que hace la función es iterar por todo sem_table y e inicializar todos los valores a lo que 
+    corresponden. En este caso, se pone sem.value = -1 para denotar que el semaphore está libre, y se llama a initlock
+    sobre todos los semaphore.lock para inicializar todos los spinlocks.
+
+    Por último implementamos pingpong.c en el user space. La implementación fue similar a la del laboratorio 1,
+    consistiendo de un fork principal en el que se dividen los llamados a ping y a pong. El manejo de errores consistió
+    en un chequeo a que se pasen la cantidad de argumentos que corresponden, en este caso 2 (el programa y el número de 
+    ejecuciones), y en ver que el número que se le pase siempre sea mayor a 0. Para traducir el argumento pasado a 
+    pingpong se usó la función atoi que lo que hace es transformar un string de números en un int. El manejo de errores 
+    del fork es simplemente chequear que el return sea siempre positivo. Dentro de pingpong.c lo primero que se hace es 
+    inicializar dos semaphores que se van a intercomunicar entre padre e hijo del fork. Uno de los semaphores empieza con 
+    un valor de 1 para que se pueda ejecutar por primera vez y no quedar atrapado en un sleep, y el otro se inicializa en 
+    0. En este caso el semaphore inicializado a 1 hace un llamado a sem_down en el padre que lo deja pasar e imprime "ping",
+    y luego se llama a sem_up de el otro semaphore. Por otro lado en el hijo se llama primero a sem_down del semaphore que 
+    fue inicializado en 0 por lo cuál entra en sleep hasta que el padre llame al sem_up que corresponde, una vez sucede eso 
+    en el hijo se imprime "pong" y se llama a sem_up del semaphore inicializado en 1 para que pueda volver a acceder al padre.
+    Esto sucede la cantidad de veces que se le halla pasado al programa, por ejemplo si se llama pingpong 20, se escribirán 
+    20 ping y 20 pong. Una vez se ejecuta todas las iteraciones el hijo sale por syscall exit() y el padre llama a wait(0) 
+    a modo de precaución, luego se llama a sem_close de los dos semaphores y el programa termina.
+
+    A la hora de realizar el laboratorio decidimos que, debido a su aparente corta implementación, lo mejor seria realizarlo 
+    de forma conjunta por meet asi se lo podria finalizar ese mismo dia. Por lo tanto, en la computadora de uno de los 
+    integrantes del grupo, fuimos discutiendo e implementando una a una cada syscall.
+
+
